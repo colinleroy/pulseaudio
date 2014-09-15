@@ -54,6 +54,17 @@ PA_MODULE_LOAD_ONCE(true);
 
 #define SERVICE_TYPE_SINK "_raop._tcp"
 
+struct userdata {
+    pa_core *core;
+    pa_module *module;
+
+    AvahiPoll *avahi_poll;
+    AvahiClient *client;
+    AvahiServiceBrowser *sink_browser;
+
+    pa_hashmap *tunnels;
+};
+
 static const char* const valid_modargs[] = {
     NULL
 };
@@ -63,16 +74,6 @@ struct tunnel {
     AvahiProtocol protocol;
     char *name, *type, *domain;
     uint32_t module_index;
-};
-
-struct userdata {
-    pa_core *core;
-    pa_module *module;
-    AvahiPoll *avahi_poll;
-    AvahiClient *client;
-    AvahiServiceBrowser *sink_browser;
-
-    pa_hashmap *tunnels;
 };
 
 static unsigned tunnel_hash(const void *p) {
@@ -104,11 +105,11 @@ static int tunnel_compare(const void *a, const void *b) {
     return 0;
 }
 
-static struct tunnel *tunnel_new(
+static struct tunnel* tunnel_new(
         AvahiIfIndex interface, AvahiProtocol protocol,
         const char *name, const char *type, const char *domain) {
-
     struct tunnel *t;
+
     t = pa_xnew(struct tunnel, 1);
     t->interface = interface;
     t->protocol = protocol;
@@ -116,6 +117,7 @@ static struct tunnel *tunnel_new(
     t->type = pa_xstrdup(type);
     t->domain = pa_xstrdup(domain);
     t->module_index = PA_IDXSET_INVALID;
+
     return t;
 }
 
@@ -136,88 +138,167 @@ static void resolver_cb(
         AvahiStringList *txt,
         AvahiLookupResultFlags flags,
         void *userdata) {
-
     struct userdata *u = userdata;
     struct tunnel *tnl;
+    char *nicename, *dname, *vname, *args;
+    char *tp = NULL, *et = NULL, *cn = NULL;
+    char *ch = NULL, *ss = NULL, *sr = NULL;
+    char *t = NULL;
+    char at[AVAHI_ADDRESS_STR_MAX];
+    AvahiStringList *l;
+    pa_module *m;
 
     pa_assert(u);
 
     tnl = tunnel_new(interface, protocol, name, type, domain);
 
-    if (event != AVAHI_RESOLVER_FOUND)
+    if (event != AVAHI_RESOLVER_FOUND) {
         pa_log("Resolving of '%s' failed: %s", name, avahi_strerror(avahi_client_errno(u->client)));
-    else {
-        char *device = NULL, *nicename, *dname, *vname, *args;
-        char at[AVAHI_ADDRESS_STR_MAX];
-        AvahiStringList *l;
-        pa_module *m;
-
-        if ((nicename = strstr(name, "@"))) {
-            ++nicename;
-            if (strlen(nicename) > 0) {
-                pa_log_debug("Found RAOP: %s", nicename);
-                nicename = pa_escape(nicename, "\"'");
-            } else
-                nicename = NULL;
-        }
-
-        for (l = txt; l; l = l->next) {
-            char *key, *value;
-            pa_assert_se(avahi_string_list_get_pair(l, &key, &value, NULL) == 0);
-
-            pa_log_debug("Found key: '%s' with value: '%s'", key, value);
-            if (pa_streq(key, "device")) {
-                pa_xfree(device);
-                device = value;
-                value = NULL;
-            }
-            avahi_free(key);
-            avahi_free(value);
-        }
-
-        if (device)
-            dname = pa_sprintf_malloc("raop.%s.%s", host_name, device);
-        else
-            dname = pa_sprintf_malloc("raop.%s", host_name);
-
-        if (!(vname = pa_namereg_make_valid_name(dname))) {
-            pa_log("Cannot construct valid device name from '%s'.", dname);
-            avahi_free(device);
-            pa_xfree(dname);
-            goto finish;
-        }
-        pa_xfree(dname);
-
-        if (nicename) {
-            args = pa_sprintf_malloc("server=[%s]:%u "
-                                     "sink_name=%s "
-                                     "sink_properties='device.description=\"%s\"'",
-                                     avahi_address_snprint(at, sizeof(at), a), port,
-                                     vname,
-                                     nicename);
-            pa_xfree(nicename);
-        } else {
-            args = pa_sprintf_malloc("server=[%s]:%u "
-                                     "sink_name=%s",
-                                     avahi_address_snprint(at, sizeof(at), a), port,
-                                     vname);
-        }
-
-        pa_log_debug("Loading module-raop-sink with arguments '%s'", args);
-
-        if ((m = pa_module_load(u->core, "module-raop-sink", args))) {
-            tnl->module_index = m->index;
-            pa_hashmap_put(u->tunnels, tnl, tnl);
-            tnl = NULL;
-        }
-
-        pa_xfree(vname);
-        pa_xfree(args);
-        avahi_free(device);
+        goto  finish;
     }
 
-finish:
+    if ((nicename = strstr(name, "@"))) {
+        ++nicename;
+        if (strlen(nicename) > 0) {
+            pa_log_debug("Found RAOP: %s", nicename);
+            nicename = pa_escape(nicename, "\"'");
+        } else
+            nicename = NULL;
+    }
 
+    for (l = txt; l; l = l->next) {
+        char *key, *value;
+        pa_assert_se(avahi_string_list_get_pair(l, &key, &value, NULL) == 0);
+
+        pa_log_debug("Found key: '%s' with value: '%s'", key, value);
+
+        if (pa_streq(key, "tp")) {
+            /* Transport protocol:
+             *  - TCP = only TCP,
+             *  - UDP = only UDP,
+             *  - TCP,UDP = both supported (UDP should be prefered) */
+             if (pa_str_in_list(value, ",", "UDP"))
+                 tp = strdup("UDP");
+            else if (pa_str_in_list(value, ",", "TCP"))
+                tp = strdup("TCP");
+            else
+                tp = strdup(value);
+        } else if (pa_streq(key, "et")) {
+            /* Supported encryption types:
+             *  - 0 = none,
+             *  - 1 = RSA,
+             *  - 2 = FairPlay,
+             *  - 3 = MFiSAP,
+             *  - 4 = FairPlay SAPv2.5. */
+             if (pa_str_in_list(value, ",", "1"))
+                 et = strdup("RSA");
+             else
+                 et = strdup("none");
+        } else if (pa_streq(key, "cn")) {
+            /* Suported audio codecs:
+             *  - 0 = PCM,
+             *  - 1 = ALAC,
+             *  - 2 = AAC,
+             *  - 3 = AAC ELD. */
+            cn = strdup("PCM");
+        } else if (pa_streq(key, "md")) {
+            /* Supported metadata types:
+             *  - 0 = text,
+             *  - 1 = artwork,
+             *  - 2 = progress. */
+        } else if (pa_streq(key, "pw")) {
+            /* Requires password ? (true/false) */
+        } else if (pa_streq(key, "ch")) {
+            /* Number of channels */
+            ch = value;
+            value = NULL;
+        } else if (pa_streq(key, "ss")) {
+            /* Sample size */
+            ss = value;
+            value = NULL;
+        } else if (pa_streq(key, "sr")) {
+            /* Sample rate */
+            sr = value;
+            value = NULL;
+        }
+
+        avahi_free(key);
+        avahi_free(value);
+    }
+
+    dname = pa_sprintf_malloc("raop_output.%s", host_name);
+    if (!(vname = pa_namereg_make_valid_name(dname))) {
+        pa_log("Cannot construct valid device name from '%s'.", dname);
+        pa_xfree(dname);
+        goto finish;
+    }
+
+    pa_xfree(dname);
+
+    if (nicename) {
+        args = pa_sprintf_malloc("server=[%s]:%u "
+                                 "sink_name=%s "
+                                 "sink_properties='device.description=\"%s\"'",
+                                 avahi_address_snprint(at, sizeof(at), a), port,
+                                 vname,
+                                 nicename);
+        pa_xfree(nicename);
+    } else {
+        args = pa_sprintf_malloc("server=[%s]:%u "
+                                 "sink_name=%s",
+                                 avahi_address_snprint(at, sizeof(at), a), port,
+                                 vname);
+    }
+
+    if (tp != NULL) {
+        t = args;
+        args = pa_sprintf_malloc("%s protocol=%s", args, tp);
+        avahi_free(tp);
+        pa_xfree(t);
+    }
+    if (et != NULL) {
+        t = args;
+        args = pa_sprintf_malloc("%s encryption=%s", args, et);
+        pa_xfree(et);
+        pa_xfree(t);
+    }
+    if (cn != NULL) {
+        t = args;
+        args = pa_sprintf_malloc("%s codec=%s", args, cn);
+        pa_xfree(cn);
+        pa_xfree(t);
+    }
+    if (ch != NULL) {
+        t = args;
+        args = pa_sprintf_malloc("%s channels=%s", args, ch);
+        avahi_free(ch);
+        pa_xfree(t);
+    }
+    if (ss != NULL) {
+        t = args;
+        args = pa_sprintf_malloc("%s format=%s", args, ss);
+        avahi_free(ss);
+        pa_xfree(t);
+    }
+    if (sr != NULL) {
+        t = args;
+        args = pa_sprintf_malloc("%s rate=%s", args, sr);
+        avahi_free(sr);
+        pa_xfree(t);
+    }
+
+    pa_log_debug("Loading module-raop-sink with arguments '%s'", args);
+
+    if ((m = pa_module_load(u->core, "module-raop-sink", args))) {
+        tnl->module_index = m->index;
+        pa_hashmap_put(u->tunnels, tnl, tnl);
+        tnl = NULL;
+    }
+
+    pa_xfree(vname);
+    pa_xfree(args);
+
+finish:
     avahi_service_resolver_free(r);
 
     if (tnl)
@@ -231,7 +312,6 @@ static void browser_cb(
         const char *name, const char *type, const char *domain,
         AvahiLookupResultFlags flags,
         void *userdata) {
-
     struct userdata *u = userdata;
     struct tunnel *t;
 
@@ -250,7 +330,7 @@ static void browser_cb(
 
         /* We ignore the returned resolver object here, since the we don't
          * need to attach any special data to it, and we can still destroy
-         * it from the callback */
+         * it from the callback. */
 
     } else if (event == AVAHI_BROWSER_REMOVE) {
         struct tunnel *t2;
@@ -277,9 +357,7 @@ static void client_callback(AvahiClient *c, AvahiClientState state, void *userda
         case AVAHI_CLIENT_S_REGISTERING:
         case AVAHI_CLIENT_S_RUNNING:
         case AVAHI_CLIENT_S_COLLISION:
-
             if (!u->sink_browser) {
-
                 if (!(u->sink_browser = avahi_service_browser_new(
                               c,
                               AVAHI_IF_UNSPEC, AVAHI_PROTO_UNSPEC,
@@ -301,16 +379,16 @@ static void client_callback(AvahiClient *c, AvahiClientState state, void *userda
 
                 pa_log_debug("Avahi daemon disconnected.");
 
+                /* Try to reconnect. */
                 if (!(u->client = avahi_client_new(u->avahi_poll, AVAHI_CLIENT_NO_FAIL, client_callback, u, &error))) {
                     pa_log("avahi_client_new() failed: %s", avahi_strerror(error));
                     pa_module_unload_request(u->module, true);
                 }
             }
 
-            /* Fall through */
+            /* Fall through. */
 
         case AVAHI_CLIENT_CONNECTING:
-
             if (u->sink_browser) {
                 avahi_service_browser_free(u->sink_browser);
                 u->sink_browser = NULL;
@@ -318,12 +396,12 @@ static void client_callback(AvahiClient *c, AvahiClientState state, void *userda
 
             break;
 
-        default: ;
+        default:
+            break;
     }
 }
 
-int pa__init(pa_module*m) {
-
+int pa__init(pa_module *m) {
     struct userdata *u;
     pa_modargs *ma = NULL;
     int error;
@@ -360,8 +438,9 @@ fail:
     return -1;
 }
 
-void pa__done(pa_module*m) {
-    struct userdata*u;
+void pa__done(pa_module *m) {
+    struct userdata *u;
+
     pa_assert(m);
 
     if (!(u = m->userdata))
