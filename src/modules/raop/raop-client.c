@@ -109,6 +109,8 @@ struct pa_raop_client {
     pa_raop_packet_buffer *pbuf;
 
     uint16_t seq;
+    uint16_t initial_seq;
+
     uint32_t rtptime;
     bool is_recording;
     uint32_t ssrc;
@@ -336,7 +338,12 @@ static size_t build_tcp_audio_packet(pa_raop_client *c, pa_memchunk *block, pa_m
     buffer += packet->index / sizeof(uint32_t);
     raw += block->index;
 
-    c->seq++;
+    if (c->seq == 0xFFFF) {
+	pa_log_debug("resetting sequence number");
+	c->seq = pa_raop_packet_buffer_shift_seq(c->pbuf, c->seq, c->initial_seq);
+    } else
+	c->seq++;
+
     memcpy(buffer, tcp_audio_header, sizeof(tcp_audio_header));
     buffer[1] |= htonl((uint32_t) c->seq);
     buffer[2] = htonl(c->rtptime);
@@ -437,7 +444,11 @@ static size_t build_udp_audio_packet(pa_raop_client *c, pa_memchunk *block, pa_m
     else
         size += write_AAC_data(((uint8_t *) buffer + head), packet->length - head, raw, &length);
     c->rtptime += length / 4;
-    c->seq++;
+    if (c->seq == 0xFFFF) {
+	pa_log_debug("resetting sequence number");
+	c->seq = pa_raop_packet_buffer_shift_seq(c->pbuf, c->seq, c->initial_seq);
+    } else
+	c->seq++;
 
     pa_memblock_release(block->memblock);
 
@@ -1050,6 +1061,7 @@ static void rtsp_stream_cb(pa_rtsp_client *rtsp, pa_rtsp_state_t state, pa_rtsp_
             }
 
             pa_rtsp_record(c->rtsp, &c->seq, &c->rtptime);
+	    c->initial_seq = c->seq;
 
             pa_xfree(trs);
             pa_xfree(ajs);
