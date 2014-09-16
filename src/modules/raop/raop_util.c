@@ -41,11 +41,11 @@
 
 #include "raop_util.h"
 
-#ifdef HAVE_OPENSSL
-#define MD5_HASH_LENGTH MD5_DIGEST_LENGTH
-#else
-#define MD5_HASH_LENGTH 16
+#ifndef MD5_DIGEST_LENGTH
+#define MD5_DIGEST_LENGTH 16
 #endif
+
+#define MD5_HASH_LENGTH (2*MD5_DIGEST_LENGTH)
 
 #define BASE64_DECODE_ERROR 0xffffffff
 
@@ -154,13 +154,17 @@ int pa_raop_base64_decode(const char *str, void *data) {
 }
 
 int pa_raop_md5_hash(const char *data, int len, char **str) {
+    unsigned char d[MD5_DIGEST_LENGTH];
     char *s = NULL;
+    int i;
 
     pa_assert(data);
     pa_assert(str);
 
-    s = pa_xnew(char, MD5_HASH_LENGTH + 1);
-    MD5((unsigned char*) data, len, (unsigned char*) s);
+    MD5((unsigned char*) data, len, d);
+    s = pa_xnew(char, MD5_HASH_LENGTH);
+    for (i = 0; i < MD5_DIGEST_LENGTH; i++)
+        sprintf(&s[2*i], "%02x", (unsigned int) d[i]);
 
     *str = s;
     s[MD5_HASH_LENGTH] = 0;
