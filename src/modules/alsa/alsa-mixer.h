@@ -164,7 +164,7 @@ struct pa_alsa_jack {
     char *alsa_name; /* E g "Headphone Jack" */
     bool has_control; /* is the jack itself present? */
     bool plugged_in; /* is this jack currently plugged in? */
-    snd_hctl_elem_t *hctl_elem; /* Jack detection handle */
+    snd_mixer_elem_t *melem; /* Jack detection handle */
     pa_available_t state_unplugged, state_plugged;
 
     pa_alsa_required_t required;
@@ -226,7 +226,7 @@ void pa_alsa_element_dump(pa_alsa_element *e);
 
 pa_alsa_path *pa_alsa_path_new(const char *paths_dir, const char *fname, pa_alsa_direction_t direction);
 pa_alsa_path *pa_alsa_path_synthesize(const char *element, pa_alsa_direction_t direction);
-int pa_alsa_path_probe(pa_alsa_path *p, snd_mixer_t *m, snd_hctl_t *hctl, bool ignore_dB);
+int pa_alsa_path_probe(pa_alsa_path *p, snd_mixer_t *m, bool ignore_dB);
 void pa_alsa_path_dump(pa_alsa_path *p);
 int pa_alsa_path_get_volume(pa_alsa_path *p, snd_mixer_t *m, const pa_channel_map *cm, pa_cvolume *v);
 int pa_alsa_path_get_mute(pa_alsa_path *path, snd_mixer_t *m, bool *muted);
@@ -335,7 +335,7 @@ void pa_alsa_profile_set_free(pa_alsa_profile_set *s);
 void pa_alsa_profile_set_dump(pa_alsa_profile_set *s);
 void pa_alsa_profile_set_drop_unsupported(pa_alsa_profile_set *s);
 
-snd_mixer_t *pa_alsa_open_mixer_for_pcm(snd_pcm_t *pcm, char **ctl_device, snd_hctl_t **hctl);
+snd_mixer_t *pa_alsa_open_mixer_for_pcm(snd_pcm_t *pcm, char **ctl_device);
 
 pa_alsa_fdlist *pa_alsa_fdlist_new(void);
 void pa_alsa_fdlist_free(pa_alsa_fdlist *fdl);

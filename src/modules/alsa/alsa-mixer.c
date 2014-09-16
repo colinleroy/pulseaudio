@@ -1725,12 +1725,11 @@ static int element_probe(pa_alsa_element *e, snd_mixer_t *m) {
     return 0;
 }
 
-static int jack_probe(pa_alsa_jack *j, snd_hctl_t *h) {
-    pa_assert(h);
+static int jack_probe(pa_alsa_jack *j, snd_mixer_t *m) {
     pa_assert(j);
     pa_assert(j->path);
 
-    j->has_control = pa_alsa_find_jack(h, j->alsa_name) != NULL;
+    j->has_control = pa_alsa_mixer_find(m, j->alsa_name, 0) != NULL;
 
     if (j->has_control) {
         if (j->required_absent != PA_ALSA_REQUIRED_IGNORE)
@@ -2658,7 +2657,7 @@ static void path_create_settings(pa_alsa_path *p) {
     element_create_settings(p->elements, NULL);
 }
 
-int pa_alsa_path_probe(pa_alsa_path *p, snd_mixer_t *m, snd_hctl_t *hctl, bool ignore_dB) {
+int pa_alsa_path_probe(pa_alsa_path *p, snd_mixer_t *m, bool ignore_dB) {
     pa_alsa_element *e;
     pa_alsa_jack *j;
     double min_dB[PA_CHANNEL_POSITION_MAX], max_dB[PA_CHANNEL_POSITION_MAX];
@@ -2678,7 +2677,7 @@ int pa_alsa_path_probe(pa_alsa_path *p, snd_mixer_t *m, snd_hctl_t *hctl, bool i
     pa_log_debug("Probing path '%s'", p->name);
 
     PA_LLIST_FOREACH(j, p->jacks) {
-        if (jack_probe(j, hctl) < 0) {
+        if (jack_probe(j, m) < 0) {
             p->supported = false;
             pa_log_debug("Probe of jack '%s' failed.", j->alsa_name);
             return -1;
@@ -3852,7 +3851,6 @@ static void mapping_paths_probe(pa_alsa_mapping *m, pa_alsa_profile *profile,
     snd_pcm_t *pcm_handle;
     pa_alsa_path_set *ps;
     snd_mixer_t *mixer_handle;
-    snd_hctl_t *hctl_handle;
 
     if (direction == PA_ALSA_DIRECTION_OUTPUT) {
         if (m->output_path_set)
@@ -3871,7 +3869,7 @@ static void mapping_paths_probe(pa_alsa_mapping *m, pa_alsa_profile *profile,
 
     pa_assert(pcm_handle);
 
-    mixer_handle = pa_alsa_open_mixer_for_pcm(pcm_handle, NULL, &hctl_handle);
+    mixer_handle = pa_alsa_open_mixer_for_pcm(pcm_handle, NULL);
     if (!mixer_handle) {
         /* Cannot open mixer, remove all entries */
         pa_hashmap_remove_all(ps->paths);
@@ -3879,7 +3877,7 @@ static void mapping_paths_probe(pa_alsa_mapping *m, pa_alsa_profile *profile,
     }
 
     PA_HASHMAP_FOREACH(p, ps->paths, state) {
-        if (pa_alsa_path_probe(p, mixer_handle, hctl_handle, m->profile_set->ignore_dB) < 0) {
+        if (pa_alsa_path_probe(p, mixer_handle, m->profile_set->ignore_dB) < 0) {
             pa_hashmap_remove(ps->paths, p);
         }
     }

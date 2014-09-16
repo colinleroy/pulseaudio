@@ -1457,32 +1457,72 @@ bool pa_alsa_may_tsched(bool want) {
     return true;
 }
 
-snd_hctl_elem_t* pa_alsa_find_jack(snd_hctl_t *hctl, const char* jack_name) {
-    snd_ctl_elem_id_t *id;
+#define SND_MIXER_ELEM_PULSEAUDIO (SND_MIXER_ELEM_LAST + 10)
 
-    snd_ctl_elem_id_alloca(&id);
-    snd_ctl_elem_id_clear(id);
-    snd_ctl_elem_id_set_interface(id, SND_CTL_ELEM_IFACE_CARD);
-    snd_ctl_elem_id_set_name(id, jack_name);
+snd_mixer_elem_t *pa_alsa_mixer_find(snd_mixer_t *mixer, const char *name, unsigned int device) {
+    snd_mixer_elem_t *elem;
 
-    return snd_hctl_find_elem(hctl, id);
+    for (elem = snd_mixer_first_elem(mixer); elem; elem = snd_mixer_elem_next(elem)) {
+        snd_hctl_elem_t *helem;
+        if (snd_mixer_elem_get_type(elem) != SND_MIXER_ELEM_PULSEAUDIO)
+            continue;
+        helem = snd_mixer_elem_get_private(elem);
+        if (!pa_streq(snd_hctl_elem_get_name(helem), name))
+            continue;
+        if (snd_hctl_elem_get_device(helem) != device)
+            continue;
+        return elem;
+    }
+    return NULL;
 }
 
-snd_hctl_elem_t* pa_alsa_find_eld_ctl(snd_hctl_t *hctl, int device) {
-    snd_ctl_elem_id_t *id;
-
-    /* See if we can find the ELD control */
-    snd_ctl_elem_id_alloca(&id);
-    snd_ctl_elem_id_clear(id);
-    snd_ctl_elem_id_set_interface(id, SND_CTL_ELEM_IFACE_PCM);
-    snd_ctl_elem_id_set_name(id, "ELD");
-    snd_ctl_elem_id_set_device(id, device);
-
-    return snd_hctl_find_elem(hctl, id);
+static int mixer_class_compare(const snd_mixer_elem_t *c1, const snd_mixer_elem_t *c2)
+{
+    /* Dummy compare function */
+    return c1 == c2 ? 0 : (c1 > c2 ? 1 : -1);
 }
 
-static int prepare_mixer(snd_mixer_t *mixer, const char *dev, snd_hctl_t **hctl) {
+static int mixer_class_event(snd_mixer_class_t *class, unsigned int mask,
+			snd_hctl_elem_t *helem, snd_mixer_elem_t *melem)
+{
     int err;
+    const char *name = snd_hctl_elem_get_name(helem);
+    if (mask & SND_CTL_EVENT_MASK_ADD) {
+        snd_ctl_elem_iface_t iface = snd_hctl_elem_get_interface(helem);
+        if (iface == SND_CTL_ELEM_IFACE_CARD || iface == SND_CTL_ELEM_IFACE_PCM) {
+            snd_mixer_elem_t *new_melem;
+
+            /* Put the hctl pointer as our private data - it will be useful for callbacks */
+            if ((err = snd_mixer_elem_new(&new_melem, SND_MIXER_ELEM_PULSEAUDIO, 0, helem, NULL)) < 0) {
+                pa_log_warn("snd_mixer_elem_new failed: %s", pa_alsa_strerror(err));
+                return 0;
+            }
+
+            if ((err = snd_mixer_elem_attach(new_melem, helem)) < 0) {
+                pa_log_warn("snd_mixer_elem_attach failed: %s", pa_alsa_strerror(err));
+		snd_mixer_elem_free(melem);
+                return 0;
+            }
+
+            if ((err = snd_mixer_elem_add(new_melem, class)) < 0) {
+                pa_log_warn("snd_mixer_elem_add failed: %s", pa_alsa_strerror(err));
+                return 0;
+            }
+        }
+    }
+    else if (mask & SND_CTL_EVENT_MASK_VALUE) {
+        snd_mixer_elem_value(melem); /* Calls the element callback */
+        return 0;
+    }
+    else
+        pa_log_info("Got an unknown mixer class event for %s: mask 0x%x\n", name, mask);
+
+    return 0;
+}
+
+static int prepare_mixer(snd_mixer_t *mixer, const char *dev) {
+    int err;
+    snd_mixer_class_t *class;
 
     pa_assert(mixer);
     pa_assert(dev);
@@ -1492,12 +1532,18 @@ static int prepare_mixer(snd_mixer_t *mixer, const char *dev, snd_hctl_t **hctl)
         return -1;
     }
 
-    /* Note: The hctl handle returned should not be freed.
-       It is closed/freed by alsa-lib on snd_mixer_close/free */
-    if (hctl && (err = snd_mixer_get_hctl(mixer, dev, hctl)) < 0) {
-        pa_log_info("Unable to get hctl of mixer %s: %s", dev, pa_alsa_strerror(err));
+    if (snd_mixer_class_malloc(&class)) {
+        pa_log_info("Failed to allocate mixer class for %s", dev);
         return -1;
     }
+    snd_mixer_class_set_event(class, mixer_class_event);
+    snd_mixer_class_set_compare(class, mixer_class_compare);
+    if ((err = snd_mixer_class_register(class, mixer)) < 0) {
+        pa_log_info("Unable register mixer class for %s: %s", dev, pa_alsa_strerror(err));
+        snd_mixer_class_free(class);
+        return -1;
+    }
+    /* From here on, the mixer class is deallocated by alsa on snd_mixer_close/free. */
 
     if ((err = snd_mixer_selem_register(mixer, NULL, NULL)) < 0) {
         pa_log_warn("Unable to register mixer: %s", pa_alsa_strerror(err));
@@ -1513,7 +1559,7 @@ static int prepare_mixer(snd_mixer_t *mixer, const char *dev, snd_hctl_t **hctl)
     return 0;
 }
 
-snd_mixer_t *pa_alsa_open_mixer(int alsa_card_index, char **ctl_device, snd_hctl_t **hctl) {
+snd_mixer_t *pa_alsa_open_mixer(int alsa_card_index, char **ctl_device) {
     int err;
     snd_mixer_t *m;
     char *md;
@@ -1527,7 +1573,7 @@ snd_mixer_t *pa_alsa_open_mixer(int alsa_card_index, char **ctl_device, snd_hctl
 
     /* Then, try by card index */
     md = pa_sprintf_malloc("hw:%i", alsa_card_index);
-    if (prepare_mixer(m, md, hctl) >= 0) {
+    if (prepare_mixer(m, md) >= 0) {
 
         if (ctl_device)
             *ctl_device = md;
@@ -1543,7 +1589,7 @@ snd_mixer_t *pa_alsa_open_mixer(int alsa_card_index, char **ctl_device, snd_hctl
     return NULL;
 }
 
-snd_mixer_t *pa_alsa_open_mixer_for_pcm(snd_pcm_t *pcm, char **ctl_device, snd_hctl_t **hctl) {
+snd_mixer_t *pa_alsa_open_mixer_for_pcm(snd_pcm_t *pcm, char **ctl_device) {
     int err;
     snd_mixer_t *m;
     const char *dev;
@@ -1559,7 +1605,7 @@ snd_mixer_t *pa_alsa_open_mixer_for_pcm(snd_pcm_t *pcm, char **ctl_device, snd_h
 
     /* First, try by name */
     if ((dev = snd_pcm_name(pcm)))
-        if (prepare_mixer(m, dev, hctl) >= 0) {
+        if (prepare_mixer(m, dev) >= 0) {
             if (ctl_device)
                 *ctl_device = pa_xstrdup(dev);
 
@@ -1576,7 +1622,7 @@ snd_mixer_t *pa_alsa_open_mixer_for_pcm(snd_pcm_t *pcm, char **ctl_device, snd_h
             md = pa_sprintf_malloc("hw:%i", card_idx);
 
             if (!dev || !pa_streq(dev, md))
-                if (prepare_mixer(m, md, hctl) >= 0) {
+                if (prepare_mixer(m, md) >= 0) {
 
                     if (ctl_device)
                         *ctl_device = md;
@@ -1594,25 +1640,19 @@ snd_mixer_t *pa_alsa_open_mixer_for_pcm(snd_pcm_t *pcm, char **ctl_device, snd_h
     return NULL;
 }
 
-int pa_alsa_get_hdmi_eld(snd_hctl_t *hctl, int device, pa_hdmi_eld *eld) {
+int pa_alsa_get_hdmi_eld(snd_hctl_elem_t *elem, pa_hdmi_eld *eld) {
 
     /* The ELD format is specific to HDA Intel sound cards and defined in the
        HDA specification: http://www.intel.com/content/www/us/en/standards/high-definition-audio-specification.html */
     int err;
-    snd_hctl_elem_t *elem;
     snd_ctl_elem_info_t *info;
     snd_ctl_elem_value_t *value;
     uint8_t *elddata;
     unsigned int eldsize, mnl;
+    unsigned int device;
 
     pa_assert(eld != NULL);
-
-    /* See if we can find the ELD control */
-    elem = pa_alsa_find_eld_ctl(hctl, device);
-    if (elem == NULL) {
-        pa_log_debug("No ELD info control found (for device=%d)", device);
-        return -1;
-    }
+    pa_assert(elem != NULL);
 
     /* Does it have any contents? */
     snd_ctl_elem_info_alloca(&info);
@@ -1623,6 +1663,7 @@ int pa_alsa_get_hdmi_eld(snd_hctl_t *hctl, int device, pa_hdmi_eld *eld) {
         return -1;
     }
 
+    device = snd_hctl_elem_get_device(elem);
     eldsize = snd_ctl_elem_info_get_count(info);
     elddata = (unsigned char *) snd_ctl_elem_value_get_bytes(value);
     if (elddata == NULL || eldsize == 0) {
