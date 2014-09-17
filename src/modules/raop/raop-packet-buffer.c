@@ -94,7 +94,7 @@ uint16_t pa_raop_packet_buffer_shift_seq(pa_raop_packet_buffer *pb, uint16_t seq
     pa_assert(pb);
 
     if (seq_shift > pb->seq)
-	seq_shift = pb->seq - 1;
+        seq_shift = pb->seq - 1;
 
     pb->seq -= seq_shift;
 
