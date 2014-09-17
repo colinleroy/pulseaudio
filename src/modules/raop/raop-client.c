@@ -109,7 +109,6 @@ struct pa_raop_client {
     pa_raop_packet_buffer *pbuf;
 
     uint16_t seq;
-    uint16_t initial_seq;
 
     uint32_t rtptime;
     bool is_recording;
@@ -339,8 +338,8 @@ static size_t build_tcp_audio_packet(pa_raop_client *c, pa_memchunk *block, pa_m
     raw += block->index;
 
     if (c->seq == 0xFFFF) {
-        pa_log_debug("resetting sequence number");
-        c->seq = pa_raop_packet_buffer_shift_seq(c->pbuf, c->seq, c->initial_seq);
+        pa_log_debug("wraping sequence number");
+        c->seq = pa_raop_packet_buffer_wrap_seq(c->pbuf, c->seq);
     } else
         c->seq++;
 
@@ -444,9 +443,10 @@ static size_t build_udp_audio_packet(pa_raop_client *c, pa_memchunk *block, pa_m
     else
         size += write_AAC_data(((uint8_t *) buffer + head), packet->length - head, raw, &length);
     c->rtptime += length / 4;
+
     if (c->seq == 0xFFFF) {
-        pa_log_debug("resetting sequence number");
-        c->seq = pa_raop_packet_buffer_shift_seq(c->pbuf, c->seq, c->initial_seq);
+        pa_log_debug("wrapping sequence number");
+        c->seq = pa_raop_packet_buffer_wrap_seq(c->pbuf, c->seq);
     } else
         c->seq++;
 
@@ -1061,7 +1061,6 @@ static void rtsp_stream_cb(pa_rtsp_client *rtsp, pa_rtsp_state_t state, pa_rtsp_
             }
 
             pa_rtsp_record(c->rtsp, &c->seq, &c->rtptime);
-            c->initial_seq = c->seq;
 
             pa_xfree(trs);
             pa_xfree(ajs);
