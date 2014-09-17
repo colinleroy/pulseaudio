@@ -89,8 +89,9 @@ void pa_raop_packet_buffer_reset(pa_raop_packet_buffer *pb, uint16_t seq) {
 }
 
 uint16_t pa_raop_packet_buffer_shift_seq(pa_raop_packet_buffer *pb, uint16_t seq, uint16_t initial_seq) {
-    pa_assert(pb);
     int seq_shift = seq - initial_seq;
+
+    pa_assert(pb);
 
     if (seq_shift > pb->seq)
 	seq_shift = pb->seq - 1;
