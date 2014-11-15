@@ -121,6 +121,45 @@ static pa_usec_t sink_get_latency(const struct userdata *u) {
     return r;
 }
 
+static void sink_set_volume_cb(pa_sink *s) {
+    struct userdata *u = s->userdata;
+    pa_cvolume hw;
+    pa_volume_t v, v_orig;
+    char t[PA_CVOLUME_SNPRINT_VERBOSE_MAX];
+
+    pa_assert(u);
+
+    /* If we're muted we don't need to do anything. */
+    if (s->muted)
+        return;
+
+    /* Calculate the max volume of all channels.
+     * We'll use this as our (single) volume on the APEX device and emulate
+     * any variation in channel volumes in software. */
+    v = pa_cvolume_max(&s->real_volume);
+
+    v_orig = v;
+    v = pa_raop_client_adjust_volume(u->raop, v_orig);
+
+    pa_log_debug("Volume adjusted: orig=%u adjusted=%u", v_orig, v);
+
+    /* Create a pa_cvolume version of our single value. */
+    pa_cvolume_set(&hw, s->sample_spec.channels, v);
+
+    /* Perform any software manipulation of the volume needed. */
+    pa_sw_cvolume_divide(&s->soft_volume, &s->real_volume, &hw);
+
+    pa_log_debug("Requested volume: %s", pa_cvolume_snprint_verbose(t, sizeof(t), &s->real_volume, &s->channel_map, false));
+    pa_log_debug("Got hardware volume: %s", pa_cvolume_snprint_verbose(t, sizeof(t), &hw, &s->channel_map, false));
+    pa_log_debug("Calculated software volume: %s",
+                 pa_cvolume_snprint_verbose(t, sizeof(t), &s->soft_volume, &s->channel_map, true));
+
+    /* Any necessary software volume manipulation is done so set
+     * our hw volume (or v as a single value) on the device. */
+    pa_raop_client_set_volume(u->raop, v);
+}
+
+
 static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offset, pa_memchunk *chunk) {
     struct userdata *u = PA_SINK(o)->userdata;
 
@@ -209,9 +248,9 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
                 }
 
                 case PA_RAOP_CONNECTED: {
-                   pa_assert(!u->rtpoll_item);
+                    pa_assert(!u->rtpoll_item);
 
-                   u->oob = pa_raop_client_register_pollfd(u->raop, u->rtpoll, &u->rtpoll_item);
+                    u->oob = pa_raop_client_register_pollfd(u->raop, u->rtpoll, &u->rtpoll_item);
 
                     return 0;
                 }
@@ -228,6 +267,9 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
                         /* Our stream has been suspended so we just flush it... */
                         pa_rtpoll_set_timer_disabled(u->rtpoll);
                         pa_raop_client_flush(u->raop);
+                    } else {
+                        /* Set the initial volume */
+                        sink_set_volume_cb(u->sink);
                     }
 
                     return 0;
@@ -264,44 +306,6 @@ static int sink_process_msg(pa_msgobject *o, int code, void *data, int64_t offse
     }
 
     return pa_sink_process_msg(o, code, data, offset, chunk);
-}
-
-static void sink_set_volume_cb(pa_sink *s) {
-    struct userdata *u = s->userdata;
-    pa_cvolume hw;
-    pa_volume_t v, v_orig;
-    char t[PA_CVOLUME_SNPRINT_VERBOSE_MAX];
-
-    pa_assert(u);
-
-    /* If we're muted we don't need to do anything. */
-    if (s->muted)
-        return;
-
-    /* Calculate the max volume of all channels.
-     * We'll use this as our (single) volume on the APEX device and emulate
-     * any variation in channel volumes in software. */
-    v = pa_cvolume_max(&s->real_volume);
-
-    v_orig = v;
-    v = pa_raop_client_adjust_volume(u->raop, v_orig);
-
-    pa_log_debug("Volume adjusted: orig=%u adjusted=%u", v_orig, v);
-
-    /* Create a pa_cvolume version of our single value. */
-    pa_cvolume_set(&hw, s->sample_spec.channels, v);
-
-    /* Perform any software manipulation of the volume needed. */
-    pa_sw_cvolume_divide(&s->soft_volume, &s->real_volume, &hw);
-
-    pa_log_debug("Requested volume: %s", pa_cvolume_snprint_verbose(t, sizeof(t), &s->real_volume, &s->channel_map, false));
-    pa_log_debug("Got hardware volume: %s", pa_cvolume_snprint_verbose(t, sizeof(t), &hw, &s->channel_map, false));
-    pa_log_debug("Calculated software volume: %s",
-                 pa_cvolume_snprint_verbose(t, sizeof(t), &s->soft_volume, &s->channel_map, true));
-
-    /* Any necessary software volume manipulation is done so set
-     * our hw volume (or v as a single value) on the device. */
-    pa_raop_client_set_volume(u->raop, v);
 }
 
 static void sink_set_mute_cb(pa_sink *s) {
